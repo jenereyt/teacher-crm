@@ -19,6 +19,7 @@ const NAV = [
   ['/payments', 'wallet', 'Оплаты'],
   ['/settings', 'settings', 'Настройки'],
 ];
+const SYNC_LABEL = { on: 'Синхронизировано', syncing: 'Синхронизация…', error: 'Ошибка синхронизации' };
 const MOBILE_NAV = ['/', '/schedule', '/students', '/payments'];
 
 function useTheme(theme) {
@@ -36,6 +37,7 @@ function useTheme(theme) {
 }
 
 function More() {
+  const sync = useSyncStatus();
   return (
     <div className="page">
       <div className="page-head"><h1>Ещё</h1></div>
@@ -48,6 +50,9 @@ function More() {
           </button>
         ))}
       </div>
+      {sync.state !== 'off' && (
+        <a href="#/settings" className={'sync-pill mt16 s-' + sync.state}><Icon name="cloud" size={16} />{SYNC_LABEL[sync.state]}</a>
+      )}
     </div>
   );
 }
@@ -81,7 +86,7 @@ export default function App() {
           ))}
         </nav>
         {sync.state !== 'off' && (
-          <a href="#/settings" className={'sync-pill s-' + sync.state}><Icon name="cloud" size={16} />{sync.state === 'on' ? 'Синхронизировано' : sync.state === 'syncing' ? 'Синхронизация…' : sync.state === 'login' ? 'Нужен вход' : 'Ошибка синхр.'}</a>
+          <a href="#/settings" className={'sync-pill s-' + sync.state}><Icon name="cloud" size={16} />{SYNC_LABEL[sync.state]}</a>
         )}
       </aside>
       <main className="main">

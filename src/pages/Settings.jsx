@@ -3,7 +3,7 @@ import { DEFAULT_TEMPLATES, alive, clearAll, exportData, mergeIn, replaceAll, se
 import { today } from '../logic.js';
 import { importStudentsCsv, lessonsCsv, paymentsCsv, studentsCsv } from '../csv.js';
 import { loadDemo } from '../demo.js';
-import { SETUP_SQL, disableSync, getConfig, saveConfig, signIn, signOut, syncNow, useSyncStatus } from '../sync.js';
+import { DEFAULT_REPO, connect, disconnect, syncNow, useSyncStatus } from '../sync.js';
 import { Field, Icon, PageHead, Segmented, copyText, downloadFile, toast } from '../ui.jsx';
 
 const CURRENCIES = ['₽', 'сум', '₸', '₴', 'сом', 'BYN', '$', '€'];
@@ -166,81 +166,82 @@ function Backup({ st }) {
 
 function SyncSection() {
   const status = useSyncStatus();
-  const cfg = getConfig();
   const [open, setOpen] = useState(false);
-  const [url, setUrl] = useState(cfg?.url || '');
-  const [key, setKey] = useState(cfg?.key || '');
-  const [email, setEmail] = useState('');
-  const [pass, setPass] = useState('');
+  const [token, setToken] = useState('');
+  const [repo, setRepo] = useState(DEFAULT_REPO);
   const [busy, setBusy] = useState(false);
 
-  const run = async (fn) => {
+  async function onConnect() {
     setBusy(true);
     try {
-      await fn();
+      await connect(token, repo);
+      setToken('');
+      toast('Синхронизация включена');
     } catch (e) {
       alert(e.message);
     } finally {
       setBusy(false);
     }
-  };
+  }
 
-  const color = { on: 'green', syncing: 'blue', error: 'red', login: 'amber', off: 'gray' }[status.state];
+  const color = { on: 'green', syncing: 'blue', error: 'red', off: 'gray' }[status.state];
+  const label = { on: 'включена', syncing: 'идёт…', error: 'ошибка', off: 'выключена' }[status.state];
+  const tokenUrl = 'https://github.com/settings/personal-access-tokens/new';
 
   return (
     <section className="card">
       <div className="card-head">
         <h2><Icon name="cloud" size={20} /> Синхронизация между устройствами</h2>
-        <span className={'badge badge-' + color}>{status.state === 'off' ? 'выключена' : status.state === 'on' ? 'включена' : status.state === 'syncing' ? 'идёт…' : status.state === 'login' ? 'нужен вход' : 'ошибка'}</span>
+        <span className={'badge badge-' + color}>{label}</span>
       </div>
-      <p className="muted small mt0">
-        Необязательно. Чтобы одни и те же данные были на ноутбуке и телефоне, подключите бесплатную облачную базу Supabase.
-        {status.message && status.state !== 'off' && <><br /><b>{status.message}</b>{status.lastSync ? ` · ${new Date(status.lastSync).toLocaleTimeString('ru-RU')}` : ''}</>}
-      </p>
 
-      {status.state === 'on' || status.state === 'syncing' || status.state === 'error' ? (
-        <div className="row gap8 wrap">
-          {status.email && <span className="muted">Вход: {status.email}</span>}
-          <button className="btn soft" disabled={busy} onClick={() => run(syncNow)}>Синхронизировать сейчас</button>
-          <button className="btn ghost" onClick={() => run(signOut)}>Выйти</button>
-        </div>
-      ) : null}
-
-      {status.state === 'login' && (
-        <div className="form-grid">
-          <Field label="Email"><input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} /></Field>
-          <Field label="Пароль"><input type="password" autoComplete="current-password" value={pass} onChange={(e) => setPass(e.target.value)} /></Field>
-          <div className="full row gap8 wrap">
-            <button className="btn primary" disabled={busy} onClick={() => run(() => signIn(email, pass))}>Войти</button>
-            <button className="btn soft" disabled={busy} onClick={() => run(() => signIn(email, pass, true))}>Зарегистрироваться</button>
-            <button className="btn ghost" onClick={() => { disableSync(); setUrl(''); setKey(''); }}>Отключить облако</button>
-          </div>
-          <p className="full muted small">На первом устройстве нажмите «Зарегистрироваться», на втором — «Войти» с теми же email и паролем.</p>
-        </div>
-      )}
-
-      {status.state === 'off' && (
+      {status.state === 'off' ? (
         <>
+          <p className="muted small mt0">
+            Необязательно. Чтобы на ноутбуке и телефоне были одни и те же данные, сайт может хранить их в вашем <b>закрытом</b> репозитории GitHub.
+            Бесплатно, а GitHub хранит историю изменений.
+          </p>
           <button className="btn soft" onClick={() => setOpen(!open)}>{open ? 'Скрыть инструкцию' : 'Настроить синхронизацию'}</button>
           {open && (
             <div className="howto">
               <ol>
-                <li>Зайдите на <a href="https://supabase.com" target="_blank" rel="noreferrer">supabase.com</a>, нажмите «Start your project» и войдите (можно через GitHub). Карта не нужна.</li>
-                <li>Нажмите «New project», придумайте название и пароль базы, регион — ближайший (например, Frankfurt). Подождите 1–2 минуты.</li>
-                <li>Слева откройте <b>SQL Editor</b>, вставьте текст ниже и нажмите <b>Run</b>.
-                  <pre className="code">{SETUP_SQL}</pre>
-                  <button className="btn small soft" onClick={() => copyText(SETUP_SQL)}>Скопировать SQL</button>
-                </li>
-                <li>Чтобы не подтверждать почту: <b>Authentication → Sign In / Providers → Email</b>, выключите «Confirm email» и сохраните (необязательно).</li>
-                <li>Откройте <b>Project Settings → API</b> (или кнопку «Connect»). Скопируйте <b>Project URL</b> и ключ <b>anon public</b> (или Publishable key) в поля ниже.</li>
+                <li>Войдите на <a href="https://github.com" target="_blank" rel="noreferrer">github.com</a>. Закрытый репозиторий <b>{DEFAULT_REPO}</b> для данных уже создан.</li>
+                <li>Откройте <a href={tokenUrl} target="_blank" rel="noreferrer">страницу создания ключа</a> (Settings → Developer settings → Fine-grained tokens → Generate new token).</li>
+                <li><b>Token name</b>: например, «CRM». <b>Expiration</b>: выберите самый долгий срок (когда срок закончится, сайт попросит новый ключ).</li>
+                <li><b>Repository access</b> → <b>Only select repositories</b> → выберите <b>{DEFAULT_REPO}</b>.</li>
+                <li><b>Permissions</b> → <b>Repository permissions</b> → <b>Contents</b> → <b>Read and write</b>.</li>
+                <li>Нажмите <b>Generate token</b>, скопируйте ключ (начинается с <code>github_pat_</code>) и вставьте ниже. Ключ показывается один раз, поэтому сохраните его в заметках телефона: он понадобится на втором устройстве.</li>
               </ol>
               <div className="form-grid">
-                <Field label="Project URL" full><input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://xxxx.supabase.co" /></Field>
-                <Field label="anon public key" full><input value={key} onChange={(e) => setKey(e.target.value)} placeholder="eyJhbGciOi…" /></Field>
+                <Field label="Ключ доступа (token)" full>
+                  <input type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} placeholder="github_pat_…" />
+                </Field>
+                <Field label="Репозиторий для данных" full hint="Обычно менять не нужно">
+                  <input value={repo} onChange={(e) => setRepo(e.target.value)} />
+                </Field>
               </div>
-              <button className="btn primary mt8" disabled={busy || !url || !key} onClick={() => run(() => saveConfig(url, key))}>Сохранить и продолжить</button>
-              <p className="muted small">Эти шаги нужно сделать один раз. На втором устройстве вставьте те же URL и ключ и нажмите «Войти».</p>
+              <button className="btn primary mt8" disabled={busy || !token.trim()} onClick={onConnect}>{busy ? 'Подключаю…' : 'Подключить'}</button>
+              <p className="muted small">
+                На втором устройстве откройте этот же раздел и вставьте тот же ключ. Данные с обоих устройств объединятся, ничего не потеряется.
+              </p>
             </div>
+          )}
+        </>
+      ) : (
+        <>
+          <p className="muted small mt0">
+            Данные хранятся в закрытом репозитории <b>{status.repo}</b> и обновляются сами через несколько секунд после изменений.
+          </p>
+          <p className={status.state === 'error' ? 'neg' : 'muted'}>
+            <b>{status.message}</b>
+            {status.lastSync ? ` · ${new Date(status.lastSync).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}` : ''}
+          </p>
+          <div className="row gap8 wrap">
+            <button className="btn soft" disabled={status.state === 'syncing'} onClick={syncNow}>Синхронизировать сейчас</button>
+            <button className="btn ghost" onClick={() => window.confirm('Отключить синхронизацию на этом устройстве? Данные останутся в браузере и в GitHub.') && disconnect()}>Отключить</button>
+          </div>
+          {status.state === 'error' && /Ключ/.test(status.message) && (
+            <p className="muted small">Нажмите «Отключить», создайте новый ключ по инструкции и подключите снова.</p>
           )}
         </>
       )}

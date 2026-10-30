@@ -1,24 +1,30 @@
-// Необязательная облачная синхронизация через бесплатный Supabase.
-// Все данные хранятся одной JSON-записью на пользователя; копии сливаются по дате изменения записей.
+// Необязательная синхронизация между устройствами через закрытый репозиторий GitHub.
+// Данные лежат одним файлом data.json; копии сливаются по дате изменения каждой записи.
 import { useSyncExternalStore } from 'react';
-import { getState, mergeIn, onLocalChange } from './store.js';
+import { COLLECTIONS, getState, mergeIn, onLocalChange } from './store.js';
+import { checkAccess, explain, syncFile } from './github.js';
 
-const CFG_KEY = 'tcrm-sync-config';
+const CFG_KEY = 'tcrm-github-sync';
+const FILE = 'data.json';
+export const DEFAULT_REPO = 'teacher-crm-data';
 
-export const SETUP_SQL = `create table if not exists public.crm_data (
-  user_id uuid primary key default auth.uid() references auth.users on delete cascade,
-  data jsonb not null,
-  updated_at timestamptz not null default now()
-);
-alter table public.crm_data enable row level security;
-create policy "own data" on public.crm_data
-  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);`;
-
-let client = null;
-let status = { state: 'off', message: 'Синхронизация выключена', email: '', lastSync: 0 };
+let cfg = loadConfig();
+let status = cfg
+  ? { state: 'on', message: 'Подключено', repo: cfg.repo, lastSync: 0 }
+  : { state: 'off', message: 'Синхронизация выключена', repo: '', lastSync: 0 };
 const listeners = new Set();
 let pushTimer = null;
 let busy = false;
+let again = false;
+
+function loadConfig() {
+  try {
+    const c = JSON.parse(localStorage.getItem(CFG_KEY));
+    return c?.token && c?.repo ? c : null;
+  } catch {
+    return null;
+  }
+}
 
 function setStatus(patch) {
   status = { ...status, ...patch };
@@ -32,106 +38,83 @@ export function useSyncStatus() {
   );
 }
 
-export function getConfig() {
-  try {
-    return JSON.parse(localStorage.getItem(CFG_KEY)) || null;
-  } catch {
-    return null;
-  }
+// Отпечаток данных: какие записи и в какой версии есть
+function fingerprint(s) {
+  const parts = [String(s.settings?.updatedAt || 0)];
+  for (const c of COLLECTIONS) parts.push((s[c] || []).map((r) => r.id + ':' + (r.updatedAt || 0)).sort().join(','));
+  return parts.join('|');
 }
 
-async function makeClient(cfg) {
-  const { createClient } = await import('@supabase/supabase-js');
-  return createClient(cfg.url.trim(), cfg.key.trim(), { auth: { persistSession: true, storageKey: 'tcrm-sb-auth' } });
-}
-
-export async function initSync() {
-  const cfg = getConfig();
-  if (!cfg?.url || !cfg?.key) return;
-  try {
-    client = await makeClient(cfg);
-    const { data } = await client.auth.getSession();
-    if (data.session) {
-      setStatus({ state: 'on', email: data.session.user.email, message: 'Подключено' });
-      await syncNow();
-    } else {
-      setStatus({ state: 'login', message: 'Войдите, чтобы включить синхронизацию' });
-    }
-  } catch (e) {
-    setStatus({ state: 'error', message: 'Ошибка подключения: ' + e.message });
-  }
-}
-
-export async function saveConfig(url, key) {
-  localStorage.setItem(CFG_KEY, JSON.stringify({ url, key }));
-  client = await makeClient({ url, key });
-  setStatus({ state: 'login', message: 'Ключи сохранены. Теперь войдите или зарегистрируйтесь.' });
-}
-
-export async function signIn(email, password, register = false) {
-  if (!client) throw new Error('Сначала сохраните адрес и ключ проекта');
-  const fn = register ? client.auth.signUp : client.auth.signInWithPassword;
-  const { data, error } = await fn.call(client.auth, { email, password });
-  if (error) throw new Error(error.message);
-  if (!data.session) {
-    setStatus({ state: 'login', message: 'Проверьте почту и подтвердите адрес, затем войдите.' });
-    return;
-  }
-  setStatus({ state: 'on', email: data.session.user.email, message: 'Подключено' });
+export async function connect(token, repo) {
+  const info = await checkAccess(token.trim(), (repo || DEFAULT_REPO).trim()).catch((e) => {
+    throw new Error(explain(e));
+  });
+  if (!info.isPrivate) throw new Error('Этот репозиторий публичный — данные учеников увидят все. Сделайте его закрытым (Settings → Danger Zone → Change visibility) или выберите другой.');
+  cfg = { token: token.trim(), repo: info.repo };
+  localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
+  setStatus({ state: 'on', repo: info.repo, message: 'Подключено' });
   await syncNow();
 }
 
-export async function signOut() {
-  if (client) await client.auth.signOut();
-  setStatus({ state: 'login', email: '', message: 'Вы вышли. Данные остались в этом браузере.' });
-}
-
-export function disableSync() {
+export function disconnect() {
   localStorage.removeItem(CFG_KEY);
-  client = null;
-  setStatus({ state: 'off', email: '', message: 'Синхронизация выключена' });
+  cfg = null;
+  clearTimeout(pushTimer);
+  setStatus({ state: 'off', repo: '', message: 'Синхронизация выключена. Данные остались в этом браузере.' });
 }
 
 export async function syncNow() {
-  if (!client || busy || !['on', 'error'].includes(status.state)) return;
+  if (!cfg) return;
+  if (busy) {
+    again = true;
+    return;
+  }
   busy = true;
   setStatus({ state: 'syncing', message: 'Синхронизация…' });
   try {
-    const { data: u } = await client.auth.getUser();
-    if (!u?.user) {
-      setStatus({ state: 'login', message: 'Сессия истекла, войдите снова' });
-      return;
-    }
-    const { data: rows, error } = await client.from('crm_data').select('data').eq('user_id', u.user.id).maybeSingle();
-    if (error) throw error;
-    if (rows?.data) mergeIn(rows.data, true);
-    const { error: e2 } = await client
-      .from('crm_data')
-      .upsert({ user_id: u.user.id, data: getState(), updated_at: new Date().toISOString() });
-    if (e2) throw e2;
+    await syncFile(
+      cfg.token,
+      cfg.repo,
+      FILE,
+      (remote) => {
+        if (remote) mergeIn(remote, true);
+        return getState();
+      },
+      (remote, merged) => fingerprint(remote) === fingerprint(merged)
+    );
     setStatus({ state: 'on', message: 'Синхронизировано', lastSync: Date.now() });
   } catch (e) {
-    const msg = e.message || String(e);
-    setStatus({
-      state: 'error',
-      message: /crm_data/.test(msg) ? 'Таблица не найдена — выполните SQL из инструкции' : 'Ошибка: ' + msg,
-    });
+    setStatus({ state: 'error', message: explain(e) });
   } finally {
     busy = false;
+    if (again) {
+      again = false;
+      syncNow();
+    }
   }
 }
 
-// Автоматически отправляем изменения через 3 секунды после правки
+export function initSync() {
+  if (cfg) syncNow();
+}
+
+// Отправляем изменения через 3 секунды после последней правки
 onLocalChange(() => {
-  if (!client || (status.state !== 'on' && status.state !== 'error')) return;
+  if (!cfg) return;
   clearTimeout(pushTimer);
   pushTimer = setTimeout(syncNow, 3000);
 });
 
-// Подтягиваем изменения с другого устройства при возвращении на вкладку
 if (typeof document !== 'undefined') {
+  // Подтягиваем изменения с другого устройства, когда вкладка снова открыта
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') syncNow();
+    // Уходя со страницы, сразу отправляем несохранённое
+    if (document.visibilityState === 'hidden' && pushTimer) {
+      clearTimeout(pushTimer);
+      pushTimer = null;
+      syncNow();
+    }
   });
   setInterval(() => document.visibilityState === 'visible' && syncNow(), 60000);
 }
